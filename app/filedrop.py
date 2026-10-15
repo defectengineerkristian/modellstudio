@@ -1,9 +1,5 @@
-"""Dateien aus dem Windows-Explorer übernehmen: per Drag & Drop auf das Fenster oder per Strg+V
-(dazu: erkennen, ob ein Bild wie ein Screenshot in der Zwischenablage liegt).
-
-Tkinter kann das von sich aus nicht; hier wird die Windows-Schnittstelle direkt über ctypes benutzt
-(DragAcceptFiles + WM_DROPFILES bzw. Zwischenablage-Format CF_HDROP). Auf anderen Systemen tun die
-Funktionen einfach nichts.
+"""Dateien per Drag & Drop (WM_DROPFILES) und aus der Zwischenablage (CF_HDROP) übernehmen – über ctypes,
+weil Tkinter das nicht kann. Auf anderen Systemen tun die Funktionen nichts.
 """
 
 import ctypes
@@ -59,9 +55,7 @@ def enable_drop(window: tk.Misc, callback) -> bool:
 
         def proc(h, msg, wparam, lparam):
             if msg == WM_DROPFILES:
-                # Hier nur die Pfade abholen und KEIN Tkinter aufrufen: Die Fensterprozedur läuft mitten in
-                # Tks Ereignisverarbeitung, ein Tk-Aufruf von hier bringt Pythons Thread-Verwaltung durcheinander
-                # („Fatal Python error: PyEval_RestoreThread“, das Programm stürzt ab). poll() übernimmt.
+                # Hier KEIN Tkinter aufrufen („Fatal Python error: PyEval_RestoreThread“) – poll() übernimmt.
                 try:
                     dropped.append(_query_files(ctypes.c_void_p(wparam)))
                 except Exception:

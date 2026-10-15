@@ -1,16 +1,9 @@
-"""WebFusedAgentMod – Netzwerkteil: ein Gastgeber-Raum für den gemeinsamen Gruppenchat mehrerer
-ModellStudio-Rechner (gedacht für Verbindungen über Tailscale/WireGuard, funktioniert aber in jedem Netz).
+"""WebFusedAgentMod – Netzwerkteil. RoomServer läuft beim Gastgeber (Teilnehmer, Nachrichten, nummerierte
+Ereignisse, Long-Polling bis 20 s), RoomClient bei jedem Teilnehmer, auch beim Gastgeber.
 
-RoomServer  läuft beim Gastgeber: hält Teilnehmer, Nachrichten und eine fortlaufend nummerierte
-            Ereignisliste. Clients holen Neues per Long-Polling (GET /api/events wartet bis zu 20 s).
-RoomClient  läuft bei jedem Teilnehmer – auch beim Gastgeber selbst.
-
-Sicherheit:
-- Jede Anfrage ist mit dem Raum-Schlüssel signiert (HMAC-SHA256 über Methode, Pfad, Zeit und Inhalt);
-  der Schlüssel selbst wird nie übertragen. Abgelaufene oder gefälschte Anfragen werden abgewiesen.
-- Ein Teilnehmer kann nur eigene Nachrichten fortschreiben. Größen und Häufigkeit sind begrenzt.
-- Der Server reicht ausschließlich Chatnachrichten weiter – kein Zugriff auf Dateien, Modelle oder
-  llama-server. Was eine KI tut, entscheidet allein der Rechner, auf dem sie läuft.
+Sicherheit: Jede Anfrage ist HMAC-SHA256-signiert (Methode, Pfad, Zeit, Inhalt), der Schlüssel geht nie über
+das Netz. Teilnehmer schreiben nur eigene Nachrichten fort; Größe und Häufigkeit sind begrenzt. Der Server
+reicht nur Chatnachrichten weiter – was eine KI tut, entscheidet allein ihr eigener Rechner.
 """
 
 import base64

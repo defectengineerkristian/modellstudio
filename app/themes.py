@@ -301,8 +301,6 @@ class ThemeManager:
             s.configure("ChipInfo.TLabel", foreground="#666666", font=(FONT[0], 8))
             s.configure("ChipError.TLabel", foreground="#c01c28", font=(FONT[0], 8))
             s.configure("Chip.TButton", padding=(2, 0), width=2)
-            s.configure("Mode.TButton", padding=(6, 4))
-            s.configure("ModeOn.TButton", padding=(6, 4), font=(FONT[0], 9, "bold"))
             s.configure("SidebarText.TLabel", font=(FONT[0], 9))
             s.configure("SidebarMuted.TLabel", foreground="#666666", font=(FONT[0], 8))
             s.configure("SidebarTitle.TLabel", font=(FONT[0], 11, "bold"))
@@ -494,16 +492,6 @@ class ThemeManager:
         s.configure("SidebarWarn.TLabel", background=sb, foreground=p["chat"]["error"], font=(FONT[0], 8))
         s.configure("Sidebar.TCheckbutton", background=sb, foreground=p["fg"], focuscolor=sb, font=(FONT[0], 9))
         s.map("Sidebar.TCheckbutton", background=[("active", sb)], foreground=[("disabled", p["muted"])])
-        # Moduswahl oben links (Chat | WebFusedAgentMod)
-        s.configure("Mode.TButton", background=sb, foreground=p["muted"], bordercolor=p["border"], lightcolor=sb,
-                    darkcolor=sb, focuscolor=sb, padding=(6, 4), font=(FONT[0], 9))
-        mode_bg = [("pressed", p["side_sel"]), ("active", p["side_hover"])]
-        s.map("Mode.TButton", background=mode_bg, lightcolor=mode_bg, darkcolor=mode_bg,
-              foreground=[("active", p["fg"])])
-        s.configure("ModeOn.TButton", background=p["side_sel"], foreground=p["fg"], bordercolor=p["accent"],
-                    lightcolor=p["side_sel"], darkcolor=p["side_sel"], focuscolor=p["side_sel"], padding=(6, 4),
-                    font=(FONT[0], 9, "bold"))
-        s.map("ModeOn.TButton", background=[("active", p["side_sel"])])
         s.map("Sidebar.Vertical.TScrollbar", background=[("active", p["raised"])],
               lightcolor=[("active", p["raised"])], darkcolor=[("active", p["raised"])])
 

@@ -12,6 +12,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import images
+
 
 # ---------------------------------------------------------------- Modelle
 
@@ -43,9 +45,8 @@ _job = None  # Windows-Job-Objekt: alle llama-server-Prozesse enden mit dem Mode
 
 
 def _end_with_app(proc: subprocess.Popen) -> bool:
-    """Hängt proc an ein Job-Objekt mit „beim Schließen beenden“. Der Griff darauf bleibt bis zum Programmende
-    offen; endet das Modell-Studio – auch durch Absturz oder Task-Manager –, schließt Windows ihn und beendet
-    damit llama-server. Sonst bliebe der Server verwaist im Speicher (viele GB RAM/Grafikspeicher)."""
+    """proc an ein Job-Objekt mit KILL_ON_JOB_CLOSE hängen: Endet das Programm (auch durch Absturz), beendet
+    Windows den llama-server mit – sonst bliebe er mit vielen GB im Speicher."""
     global _job
     if os.name != "nt":
         return False
@@ -190,8 +191,18 @@ class LlamaServer:
 # ---------------------------------------------------------------- Chat-API
 
 def _api_messages(messages: list) -> list:
-    """Schlüssel mit "_" (z. B. "_thinking") sind nur für die Anzeige und gehen nicht an den Server."""
-    return [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
+    """Schlüssel mit "_" bleiben lokal. Ausnahme "_image_files": als image_url-Teile (data-URL), bei Nutzern
+    vor dem Text, bei Werkzeug-Ergebnissen danach."""
+    out = []
+    for m in messages:
+        msg = {k: v for k, v in m.items() if not k.startswith("_")}
+        files = [Path(f) for f in m.get("_image_files") or [] if Path(f).is_file()]
+        if files:
+            pics = [{"type": "image_url", "image_url": {"url": images.data_url(f)}} for f in files]
+            text = [{"type": "text", "text": msg["content"]}] if msg.get("content") else []
+            msg["content"] = pics + text if m.get("role") == "user" else text + pics
+        out.append(msg)
+    return out
 
 
 class _ThinkSplitter:
@@ -238,11 +249,8 @@ class _ThinkSplitter:
 
 def chat_turn(base_url: str, messages: list, params: dict, tools: list | None,
               stop: threading.Event, on_event) -> tuple[str, list, str]:
-    """Ein gestreamter Modell-Aufruf. Gibt (Antworttext, Tool-Aufrufe, Denkprozess) zurück.
-
-    on_event(art, daten) bekommt "reasoning" und "content" Stücke live mitgeteilt, am Ende "stats"
-    (erzeugte Tokens pro Sekunde), falls der Server das meldet.
-    """
+    """Ein gestreamter Modell-Aufruf → (Antworttext, Tool-Aufrufe, Denkprozess).
+    on_event(art, daten): "reasoning"/"content" live, am Ende "stats" (Tokens/s)."""
     payload = {"messages": _api_messages(messages), "stream": True, **params}
     if tools:
         payload["tools"] = tools

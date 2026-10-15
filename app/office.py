@@ -14,7 +14,7 @@ import math
 import re
 import xml.etree.ElementTree as ET
 import zipfile
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from xml.sax.saxutils import escape
 

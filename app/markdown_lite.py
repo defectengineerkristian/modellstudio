@@ -1,9 +1,4 @@
-"""Kleiner Markdown-Leser für die Chatanzeige und den Word-Export.
-
-Unterstützt das, was Sprachmodelle typischerweise schreiben: Überschriften, Listen (auch Aufgabenlisten),
-Zitate, Code-Blöcke, Tabellen, Trennlinien und im Fließtext **fett**, *kursiv*, ~~durchgestrichen~~,
-`Code` sowie Links.
-"""
+"""Kleiner Markdown-Leser für die Chatanzeige und den Word-Export (was Sprachmodelle üblicherweise schreiben)."""
 
 import re
 

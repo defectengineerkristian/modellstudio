@@ -1,17 +1,8 @@
-"""WebFusedAgentMod – Oberfläche und Ablauf des Gruppenchats.
+"""WebFusedAgentMod – Oberfläche und Ablauf des Gruppenchats (RoomMode, Netzwerk in room.py).
 
-RoomMode verbindet die App mit room.py:
-- Seitenleiste im Raum-Modus: Raum erstellen / beitreten, Einladung, Teilnehmer, Werkzeug-Freigaben.
-- Eigener Chatverlauf (zweite ChatView). Nachrichten erscheinen in der Reihenfolge des Gastgebers; jede
-  KI-Antwort bekommt einen eigenen Platz (Slot), damit mehrere KIs gleichzeitig schreiben können.
-- Die eigene KI antwortet, wenn sie mit @Name (oder @alle) erwähnt wird – auf diesem Rechner, mit dem
-  hier geladenen Modell und nur den freigegebenen Werkzeugen. Datei- und Befehlsaktionen müssen IMMER
-  bestätigt werden (auch wenn „Jede Aktion bestätigen“ sonst aus ist), weil Fremde sie auslösen könnten.
-- KIs dürfen sich gegenseitig ansprechen („Schwarm“); nach MAX_CHAIN KI-Nachrichten ohne Mensch dazwischen
-  reagieren KIs nicht mehr auf andere KIs (Schutz vor Endlosschleifen).
-
-Ereignisse aus Threads kommen über app.events: ("room", (art, daten)) vom RoomClient,
-("room_ai", (nonce, art, daten)) von der eigenen KI, ("room_ready", …) nach Erstellen/Beitreten.
+Jede Nachricht bekommt einen eigenen Slot in der zweiten ChatView, damit mehrere KIs gleichzeitig schreiben können.
+Die eigene KI antwortet auf @Name/@alle mit dem hier geladenen Modell; Werkzeugaktionen immer mit Bestätigung,
+weil Fremde sie auslösen könnten. Nach MAX_CHAIN KI-Nachrichten ohne Mensch reagieren KIs nicht mehr auf KIs.
 """
 
 import os
@@ -28,6 +19,7 @@ from tkinter import ttk
 import dialogs
 import room
 from agent import Agent, describe_call, format_args, result_ok, run_conversation
+from widgets import scrolled
 
 MAX_CHAIN = 6          # so viele KI-Nachrichten hintereinander, danach reagieren KIs nur noch auf Menschen
 CONTEXT_MESSAGES = 40  # so viele letzte Nachrichten sieht die KI höchstens
@@ -313,15 +305,9 @@ class RoomMode:
     # ================================================================ Dialoge
 
     def _form(self, title: str, fields: list[tuple], ok_text: str, note: str = "") -> dict | None:
-        """Kleiner Formulardialog im aktuellen Design. fields: (Schlüssel, Beschriftung, Wert, Optionen|None);
-        note: optionaler Hinweis unter den Feldern."""
+        """Formulardialog. fields: (Schlüssel, Beschriftung, Wert, Optionen|None)."""
         app = self.app
-        win = tk.Toplevel(app.root)
-        win.withdraw()  # fertig aufbauen, dann sauber einblenden (theme.present)
-        win.title(title)
-        win.transient(app.root)
-        win.resizable(False, False)
-        app.theme.register_window(win)
+        win = dialogs.window(title, app.root)
         body = ttk.Frame(win, padding=18)
         body.pack(fill=tk.BOTH, expand=True)
         ttk.Label(body, text=title, style="Title.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
@@ -352,11 +338,7 @@ class RoomMode:
         ttk.Button(bf, text="Abbrechen", command=win.destroy).pack(side=tk.LEFT, padx=(6, 0))
         win.bind("<Return>", ok)
         win.bind("<Escape>", lambda e: win.destroy())
-        app.root.update_idletasks()
-        app.theme.present(win, f"+{app.root.winfo_rootx() + 320}+{app.root.winfo_rooty() + 160}")
-        first.focus_set()
-        win.grab_set()
-        app.root.wait_window(win)
+        dialogs.present(win, app.root, modal=True, focus=first)
         return result or None
 
     def _default_names(self) -> tuple[str, str]:
@@ -371,8 +353,8 @@ class RoomMode:
     def _check_names(self, name: str, ai: str) -> bool:
         if not room.valid_name(name) or not room.valid_name(ai) or name.lower() == ai.lower():
             dialogs.showerror("WebFusedAgentMod", "Namen: 2–24 Zeichen ohne Leerzeichen (Buchstaben, Ziffern, "
-                                 "Punkt, Binde- und Unterstrich). Dein Name und der KI-Name müssen sich "
-                                 "unterscheiden.", parent=self.app.root)
+                              "Punkt, Binde- und Unterstrich). Dein Name und der KI-Name müssen sich "
+                              "unterscheiden.", parent=self.app.root)
             return False
         self.app.cfg.update(room_name=name, room_ai=ai)
         return True
@@ -413,30 +395,19 @@ class RoomMode:
 
     def dialog_guide(self):
         app = self.app
-        win = tk.Toplevel(app.root)
-        win.withdraw()
-        win.title("Anleitung: Rechner verbinden")
-        win.transient(app.root)
-        app.theme.register_window(win)
-        frame, text = app.scrolled_text(win, wrap=tk.WORD, width=90, height=28, font=("Segoe UI", 10),
-                                        padx=14, pady=12)
+        win = dialogs.window("Anleitung: Rechner verbinden", app.root, resizable=True)
+        frame, text = scrolled(win, wrap=tk.WORD, width=90, height=28, font=("Segoe UI", 10), padx=14, pady=12)
         frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
         text.insert("1.0", GUIDE)
         text.configure(state=tk.DISABLED)
         app.theme.register_text(text)
         ttk.Button(win, text="Schließen", command=win.destroy).pack(pady=(0, 12))
-        app.root.update_idletasks()
-        app.theme.present(win, f"+{app.root.winfo_rootx() + 200}+{app.root.winfo_rooty() + 60}")
+        dialogs.present(win, app.root)
 
     def show_invite(self):
         app = self.app
         code = self.invite_code()
-        win = tk.Toplevel(app.root)
-        win.withdraw()
-        win.title("Einladung")
-        win.transient(app.root)
-        win.resizable(False, False)
-        app.theme.register_window(win)
+        win = dialogs.window("Einladung", app.root)
         body = ttk.Frame(win, padding=18)
         body.pack(fill=tk.BOTH, expand=True)
         ttk.Label(body, text=f"Raum „{self.info['room']}“ ist offen", style="Title.TLabel").pack(anchor="w")
@@ -456,8 +427,7 @@ class RoomMode:
         ttk.Button(bf, text="Schließen", command=win.destroy).pack(side=tk.RIGHT)
         ttk.Button(bf, text="⧉ Kopieren", style="Accent.TButton",
                    command=lambda: (self.copy_invite(), win.destroy())).pack(side=tk.RIGHT, padx=(0, 6))
-        app.root.update_idletasks()
-        app.theme.present(win, f"+{app.root.winfo_rootx() + 300}+{app.root.winfo_rooty() + 180}")
+        dialogs.present(win, app.root)
 
     def invite_code(self) -> str:
         i = self.info
@@ -488,8 +458,8 @@ class RoomMode:
             server.start()
         except OSError as e:
             dialogs.showerror("WebFusedAgentMod", f"Der Raum konnte nicht geöffnet werden ({e}).\n\nIst der Port "
-                                 f"{port} schon belegt oder die Adresse {bind} nicht (mehr) vorhanden? Ggf. Raum mit "
-                                 "anderer Adresse neu erstellen.", parent=self.app.root)
+                              f"{port} schon belegt oder die Adresse {bind} nicht (mehr) vorhanden? Ggf. Raum mit "
+                              "anderer Adresse neu erstellen.", parent=self.app.root)
             self.app.cfg.pop("room_hosted", None)
             self.refresh_panel()
             return
@@ -562,8 +532,8 @@ class RoomMode:
     def leave(self):
         if self.info and self.info["is_host"]:
             if not dialogs.askyesno("Raum schließen", "Raum schließen? Alle Teilnehmer werden getrennt. Der "
-                                       "Verlauf bleibt gespeichert und der Raum kann später mit demselben "
-                                       "Einladungscode wieder geöffnet werden.", parent=self.app.root):
+                                    "Verlauf bleibt gespeichert und der Raum kann später mit demselben "
+                                    "Einladungscode wieder geöffnet werden.", parent=self.app.root):
                 return
         self.ai_stop.set()
         self.shutdown()
@@ -960,7 +930,7 @@ class RoomMode:
     def send(self, text: str, content: str, files: list[dict]) -> bool:
         if not self.client:
             dialogs.showinfo("WebFusedAgentMod", "Erst links einen Raum erstellen oder beitreten.",
-                                parent=self.app.root)
+                             parent=self.app.root)
             return False
         client = self.client
 

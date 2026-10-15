@@ -1,8 +1,5 @@
-"""Bilder für Modelle mit Bildverständnis (mmproj-Datei): prüfen, Vorschaubild erzeugen, als data-URL an
-llama-server schicken und Screenshots aus der Zwischenablage übernehmen.
-
-Nur Standardbibliothek: Vorschaubilder und Zwischenablage laufen über PowerShell/.NET (System.Drawing),
-weil Tkinter selbst kein JPG lesen kann. llama.cpp liest PNG, JPG, BMP und GIF (erstes Bild).
+"""Bilder für Modelle mit Bildverständnis: prüfen, Vorschau, data-URL, Zwischenablage, Bildschirmfoto.
+Vorschau und Zwischenablage über PowerShell/System.Drawing, weil Tk kein JPG kann.
 """
 
 import base64
@@ -30,7 +27,8 @@ def _ps_str(path: Path) -> str:
     return "'" + str(path).replace("'", "''") + "'"  # PowerShell-Zeichenkette in einfachen Anführungszeichen
 
 
-def _powershell(script: str) -> str:
+def powershell(script: str) -> str:
+    """PowerShell-Skript ausführen (ohne Fenster) und die Ausgabe zurückgeben; bei Fehlern leer."""
     try:
         # PowerShell schreibt in der OEM-Codepage (Umlaute in Fehlermeldungen)
         r = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", script], capture_output=True,
@@ -40,10 +38,12 @@ def _powershell(script: str) -> str:
         return ""
 
 
-def read(path, thumb: Path, size: int) -> Document:
-    """Prüft ein Bild und legt unter thumb ein PNG-Vorschaubild (höchstens size × size Pixel) an.
-    Ergebnis: Document ohne Text, mit image = (Breite, Höhe)."""
-    path = Path(path)
+def check(path: Path):
+    """Bild, das llama.cpp lesen kann (Endung, Größe, Dateikopf)? Sonst ValueError mit verständlichem Text."""
+    if not path.is_file():
+        raise ValueError(f"{path} ist keine Datei.")
+    if not is_image(path):
+        raise ValueError("Nur PNG-, JPG-, BMP- und GIF-Bilder können angesehen werden.")
     nbytes = path.stat().st_size
     if nbytes > MAX_BYTES:
         raise ValueError(f"Das Bild ist zu groß ({nbytes / 1024 ** 2:.0f} MB, höchstens "
@@ -51,8 +51,15 @@ def read(path, thumb: Path, size: int) -> Document:
     with open(path, "rb") as f:
         if not f.read(4).startswith(_MAGIC):
             raise ValueError("Die Datei ist kein lesbares PNG-, JPG-, BMP- oder GIF-Bild.")
+
+
+def read(path, thumb: Path, size: int) -> Document:
+    """Prüft ein Bild und legt unter thumb ein PNG-Vorschaubild (höchstens size × size Pixel) an.
+    Ergebnis: Document ohne Text, mit image = (Breite, Höhe)."""
+    path = Path(path)
+    check(path)
     thumb.parent.mkdir(parents=True, exist_ok=True)
-    out = _powershell(f"""
+    out = powershell(f"""
 Add-Type -AssemblyName System.Drawing
 $img = [System.Drawing.Image]::FromFile({_ps_str(path)})
 try {{
@@ -92,11 +99,34 @@ def data_url(path: Path) -> str:
     return f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode("ascii")
 
 
+def screenshot() -> tuple[Path, int, int]:
+    """Bildschirmfoto des Hauptbildschirms als PNG in TEMP_DIR. Ergebnis: (Pfad, Breite, Höhe).
+    SetProcessDPIAware, sonst nimmt PowerShell bei Windows-Skalierung nur einen Ausschnitt auf."""
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    target = TEMP_DIR / datetime.now().strftime("Bildschirmfoto %Y-%m-%d %H-%M-%S.png")
+    out = powershell(f"""
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type 'using System.Runtime.InteropServices; public class Dpi {{ [DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); }}'
+[Dpi]::SetProcessDPIAware() | Out-Null
+$r = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$b = New-Object System.Drawing.Bitmap $r.Width, $r.Height
+$g = [System.Drawing.Graphics]::FromImage($b)
+$g.CopyFromScreen($r.Left, $r.Top, 0, 0, $b.Size)
+$b.Save({_ps_str(target)}, [System.Drawing.Imaging.ImageFormat]::Png)
+$g.Dispose(); $b.Dispose()
+"$($r.Width) $($r.Height)\"""")
+    try:
+        w, h = (int(x) for x in out.split()[-2:])
+    except ValueError:
+        raise RuntimeError("Das Bildschirmfoto konnte nicht aufgenommen werden.") from None
+    return target, w, h
+
+
 def save_clipboard() -> Path | None:
     """Bild aus der Zwischenablage (z. B. Screenshot mit Win+Umschalt+S) als PNG speichern."""
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     target = TEMP_DIR / datetime.now().strftime("Screenshot %Y-%m-%d %H-%M-%S.png")
-    out = _powershell(f"""
+    out = powershell(f"""
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 $img = [System.Windows.Forms.Clipboard]::GetImage()
 if ($img) {{ $img.Save({_ps_str(target)}, [System.Drawing.Imaging.ImageFormat]::Png); $img.Dispose(); 'ok' }}""")

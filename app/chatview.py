@@ -1,15 +1,8 @@
-"""Chatverlauf im Stil moderner Chat-Apps – alles in einem tk.Text, damit Antworten markier- und kopierbar bleiben.
+"""Chatverlauf in einem tk.Text (bleibt markier- und kopierbar): Nutzer-Sprechblasen rechts, Markdown-Antworten
+links, aufklappbare Denkprozess-/Werkzeug-Blöcke.
 
-- Nutzer rechts in einer Sprechblase (Farbe aus dem Design), Modell links ohne Blase, Spalte mittig.
-- Antworten werden als Markdown dargestellt (Überschriften, Listen, Tabellen, Code mit Hervorhebung, Links),
-  auch schon während sie gestreamt werden.
-- Denkprozess und Werkzeugaufrufe stehen in zugeklappten Blöcken mit Kopfzeile; ein Klick klappt sie auf.
-- Während das Modell arbeitet, pulsiert die Kopfzeile; das Mausrad scrollt weich; der Verlauf folgt der
-  Antwort nur, solange man ganz unten ist.
-
-Tags mit Nummer N (Infos in self.blocks[N]): hdr:N Kopfzeile, body:N aufklappbarer Inhalt, cpy:N „Kopieren“,
-ccp:N „Code kopieren“, code:N Code-Zeilen, lnk:N Link, tbl:N Tabelle (Tabstopps). Alles Schreiben läuft über
-`with self._edit():`, weil das Textfeld sonst schreibgeschützt ist.
+Tags mit Nummer N (Infos in self.blocks[N]): hdr:N Kopfzeile, body:N Inhalt, cpy:N „Kopieren“, ccp:N „Code
+kopieren“, code:N, lnk:N, tbl:N. Geschrieben wird nur in `with self._edit():` (sonst schreibgeschützt).
 """
 
 import math
@@ -20,9 +13,11 @@ import tkinter as tk
 import webbrowser
 from contextlib import contextmanager
 from tkinter import font as tkfont
+from tkinter import ttk
 
 from markdown_lite import ListLevels, classify, closes_fence, inline, is_separator_row, plain, split_row
 from themes import mix_hex
+from widgets import rounded
 
 FAMILY, MONO = "Segoe UI", "Consolas"
 MAX_COLUMN = 820          # maximale Breite der Chatspalte (Pixel bei 100 %)
@@ -109,6 +104,9 @@ class ChatView:
         self._scroll_job = None
         self._bubble_text = ""
         self._file_path = ""
+        self.on_quote = None         # on_quote(text): „Antworten“ auf markierten Text (nur im normalen Chat)
+        self._quote_pop = None       # kleines Feld „Antworten / Kopieren“ über einer Markierung
+        self._act_job = None         # verzögertes Ausblenden von „Kopieren / Bearbeiten“
         self._make_fonts()
         self._make_tags()
 
@@ -117,6 +115,8 @@ class ChatView:
         t.bind("<Configure>", self._on_configure, add="+")
         t.bind("<MouseWheel>", self._on_wheel)
         t.bind("<Button-3>", self._on_context)
+        t.bind("<ButtonPress-1>", lambda e: self._hide_quote_pop(), add="+")
+        t.bind("<ButtonRelease-1>", self._on_release, add="+")
         t.tag_bind("clickable", "<Enter>", self._on_enter_click)
         t.tag_bind("clickable", "<Leave>", self._on_leave_click)
         t.tag_bind("clickable", "<Button-1>", self._on_click)
@@ -192,6 +192,13 @@ class ChatView:
         T("user", justify="right", spacing1=s(20), spacing3=s(12))
         T("user_files", justify="right", spacing1=s(20), spacing3=s(6))   # Datei-Kärtchen über der Blase
         T("user_after", justify="right", spacing3=s(12))                  # Blase direkt unter den Kärtchen
+        T("user_a", justify="right", spacing1=s(20), spacing3=s(3))      # Blase mit Aktionszeile darunter
+        T("user_after_a", justify="right", spacing3=s(3))
+        T("user_mid", justify="right", spacing3=s(6))                    # Kärtchen zwischen Zitat und Blase
+        T("uact", font=self.f_tiny, justify="right", spacing3=s(12))    # „Kopieren · Bearbeiten“ (beim Darüberfahren)
+        T("uver", font=self.f_small)                                     # „‹ 2/3 ›“ – Fassungen, immer sichtbar
+        T("uver_arrow", font=self.f_h2)                                  # größere Pfeile, leichter zu treffen
+        T("uver_off")                                                    # Pfeil ohne weitere Fassung (blass)
         T("who", font=self.f_small_b, spacing1=s(16), spacing3=s(4))     # Absenderzeile im Gruppenchat
         T("who_sub", font=self.f_tiny)
         T("other", spacing3=s(8))                                         # Blase/Kärtchen anderer, links
@@ -207,6 +214,8 @@ class ChatView:
         self.col = col
         r, g, b = self.t.winfo_rgb(self.t.cget("background"))
         self.bg = "#%02x%02x%02x" % (r // 257, g // 257, b // 257)
+        # Markierung auch ohne Tastaturfokus zeigen (Tk-Standard: dann unsichtbar) – wichtig für „Antworten“
+        self.t.configure(inactiveselectbackground=self.t.cget("selectbackground"))
         T = self.t.tag_configure
 
         def band(tag, color, **kw):
@@ -242,7 +251,10 @@ class ChatView:
         T("placeholder_sub", foreground=col["muted"])
         T("hover", foreground=col["fg"])
         T("live", foreground=col["muted"])
+        T("uver", foreground=col["muted"])
+        T("uver_off", foreground=mix_hex(self.bg, col["muted"], 0.4))
         self._corners.clear()
+        self._refresh_actions()
         self._redraw_bubbles()
 
     @contextmanager
@@ -288,6 +300,12 @@ class ChatView:
         self._stick = True
         self.t.see("end")
 
+    def scroll_to(self, fraction: float):
+        """An eine Stelle scrollen (z. B. nach dem Wechsel einer Fassung dort bleiben, wo man war)."""
+        self.t.update_idletasks()
+        self.t.yview_moveto(fraction)
+        self._stick = self._at_bottom()
+
     # ================================================================ Leeren / Platzhalter
 
     def clear(self):
@@ -299,6 +317,7 @@ class ChatView:
         self._at, self._pend_tag = "end-1c", "pending"
         self.md = None
         self._stop_scroll()
+        self._hide_quote_pop()
         self._stick = True
         with self._edit(follow=False):
             self.t.delete("1.0", "end")
@@ -326,25 +345,197 @@ class ChatView:
 
     # ================================================================ Nutzer-Sprechblase
 
-    def user(self, text: str, files: list[dict] | None = None):
-        """Nutzernachricht rechts: optional Datei-Kärtchen (name, info, path) und darunter die Sprechblase."""
+    def user(self, text: str, files: list[dict] | None = None, quote: str | None = None,
+             actions: dict | None = None):
+        """Nutzernachricht rechts: optional ein Zitat (Antwort auf eine markierte Stelle) und Datei-Kärtchen (name,
+        info, path), darunter die Sprechblase. actions={"on_edit": f(neuer_text) -> bool} zeigt beim Darüberfahren
+        „Kopieren“ und „Bearbeiten“ unter der Blase."""
         self._ensure()
         self.md_finish()
         self.hide_pending()
+        actions = actions if text else None
+        hover: list[tk.Canvas] = []   # alles, was beim Darüberfahren die Aktionen einblendet
         with self._edit(follow=True):
+            first = True
+            if quote:
+                c = self._canvas("arrow")
+                self.bubbles.append((c, "quote", quote))
+                self._draw_quote(c, quote)
+                self._embed(c, "user_files")
+                hover.append(c)
+                first = False
             if files:
                 c = self._canvas("arrow")
                 c.bind("<Double-Button-1>", lambda e, c=c: self._open_file(self._card_path(c)))
                 c.bind("<Button-3>", lambda e, c=c: self._on_file_menu(e, self._card_path(c)))
                 self.bubbles.append((c, "files", files))
                 self._draw_files(c, files)
-                self._embed(c, "user_files" if text else "user")
+                if text:
+                    self._embed(c, "user_files" if first else "user_mid")
+                else:
+                    self._embed(c, "user" if first else "user_after")
+                hover.append(c)
+                first = False
             if text or not files:
                 c = self._canvas("arrow")
                 c.bind("<Button-3>", lambda e, s=text: self._on_bubble_menu(e, s))
                 self.bubbles.append((c, "bubble", text))
                 self._draw_bubble(c, text)
-                self._embed(c, "user_after" if files else "user")
+                if actions:
+                    self._embed(c, "user_a" if first else "user_after_a")
+                    self._user_actions(c, text, actions, hover + [c])
+                else:
+                    self._embed(c, "user" if first else "user_after")
+
+    # ---------------------------------------------------------------- Kopieren / Bearbeiten eigener Nachrichten
+
+    def _user_actions(self, bubble: tk.Canvas, text: str, actions: dict, hover: list):
+        """Zeile „⧉ Kopieren   ✎ Bearbeiten“ unter der Blase – unsichtbar (Hintergrundfarbe), bis die Maus über
+        der Nachricht ist."""
+        cur, count = actions.get("versions") or (0, 1)
+        n = self._new("umsg", text=text, canvas=bubble, on_edit=actions.get("on_edit"), shown=False, cur=cur,
+                      on_version=actions.get("on_version"))
+        tag, line = f"uact:{n}", f"uline:{n}"   # uact: ein-/ausgeblendet; uline: ganze Zeile (beim Bearbeiten weg)
+        self.t.insert(self._at, "⧉ Kopieren", ("uact", "clickable", f"ucp:{n}", tag, line))
+        if actions.get("on_edit"):
+            self.t.insert(self._at, "      ", ("uact", tag, line))
+            self.t.insert(self._at, "✎ Bearbeiten", ("uact", "clickable", f"ued:{n}", tag, line))
+        if count > 1:  # Fassungen: immer sichtbar, ganz rechts unter der Blase
+            self.t.insert(self._at, "      ", ("uact", tag, line))
+            self.t.insert(self._at, "‹", ("uact", "uver", "uver_arrow", line)
+                          + (("clickable", f"uvp:{n}") if cur > 0 else ("uver_off",)))
+            self.t.insert(self._at, f" {cur + 1}/{count} ", ("uact", "uver", line))
+            self.t.insert(self._at, "›", ("uact", "uver", "uver_arrow", line)
+                          + (("clickable", f"uvn:{n}") if cur < count - 1 else ("uver_off",)))
+        self.t.insert(self._at, "\n", ("uact", tag, line))
+        self.t.tag_configure(tag, foreground=self.bg)
+        for w in hover:
+            w.bind("<Enter>", lambda e: self._actions_show(n), add="+")
+            w.bind("<Leave>", lambda e: self._actions_hide(n), add="+")
+        self.t.tag_bind(tag, "<Enter>", lambda e: self._actions_show(n))
+        self.t.tag_bind(tag, "<Leave>", lambda e: self._actions_hide(n))
+
+    def _actions_show(self, n: int):
+        if self._act_job:
+            self.t.after_cancel(self._act_job)
+            self._act_job = None
+        for m, b in self.blocks.items():
+            if b["kind"] == "umsg" and b["shown"] and m != n:
+                self._actions_off(m)
+        b = self.blocks.get(n)
+        if b:
+            b["shown"] = True
+            self.t.tag_configure(f"uact:{n}", foreground=self.col.get("muted", "#888888"))
+
+    def _actions_hide(self, n: int):
+        if self._act_job:
+            self.t.after_cancel(self._act_job)
+        self._act_job = self.t.after(400, lambda: self._actions_off(n))  # kurz warten: Weg von Blase zu Zeile
+
+    def _actions_off(self, n: int):
+        self._act_job = None
+        b = self.blocks.get(n)
+        if b:
+            b["shown"] = False
+            self.t.tag_configure(f"uact:{n}", foreground=self.bg)
+
+    def _refresh_actions(self):
+        """Nach einem Designwechsel: ausgeblendete Aktionen wieder in der (neuen) Hintergrundfarbe."""
+        for n, b in self.blocks.items():
+            if b["kind"] == "umsg":
+                self.t.tag_configure(f"uact:{n}", foreground=self.col["muted"] if b["shown"] else self.bg)
+
+    def _begin_edit(self, n: int):
+        """Blase durch ein Eingabefeld ersetzen. Die Blase wird nur versteckt (elide) – aus dem Text gelöschte
+        eingebettete Fenster zerstört Tk, beim Abbrechen kommt sie so unverändert zurück."""
+        b = self.blocks.get(n)
+        if not b or b.get("editing") or not b.get("on_edit"):
+            return
+        try:
+            idx = self.t.index(str(b["canvas"]))
+        except tk.TclError:
+            return
+        line_tags = tuple(tg for tg in self.t.tag_names(idx) if tg.startswith("user"))
+        frame, box = self._editor(n, b["text"])
+        with self._edit(follow=False):
+            self.t.window_create(idx, window=frame)
+            self.t.insert(f"{idx}+1c", "\n", line_tags)
+            for tg in line_tags:
+                self.t.tag_add(tg, idx)
+            bubble = self.t.index(str(b["canvas"]))
+            self.t.tag_add(f"uhide:{n}", bubble, f"{bubble}+2c")   # Blase samt Zeilenende
+            self.t.tag_configure(f"uhide:{n}", elide=True)
+            self.t.tag_configure(f"uline:{n}", elide=True)
+        b["editing"] = frame
+        box.focus_set()
+        box.mark_set("insert", "end-1c")
+
+    def _end_edit(self, n: int):
+        b = self.blocks.get(n)
+        frame = b.pop("editing", None) if b else None
+        if not frame:
+            return
+        with self._edit(follow=False):
+            try:
+                i = self.t.index(str(frame))
+                self.t.delete(i, f"{i}+2c")
+            except tk.TclError:
+                pass
+            self.t.tag_configure(f"uhide:{n}", elide=False)
+            self.t.tag_configure(f"uline:{n}", elide=False)
+
+    def _editor(self, n: int, text: str) -> tuple[tk.Frame, tk.Text]:
+        """Bearbeitungsfeld in Blasenbreite mit „Abbrechen“/„Senden“ (Enter sendet, Umschalt+Enter = neue Zeile)."""
+        col, s = self.col, self._s
+        frame = tk.Frame(self.t, background=self.bg, highlightthickness=0)
+        width = max(20, (self._bubble_max() - 2 * s(12)) // max(1, self.f_base.measure("0")))
+        lines = sum(1 + len(ln) // max(1, width) for ln in text.split("\n"))
+        box = tk.Text(frame, wrap="word", font=self.f_base, undo=True, width=width, height=max(2, min(lines, 12)),
+                      relief="flat", borderwidth=0, padx=s(12), pady=s(9), background=col["code_hdr"],
+                      foreground=col["fg"], insertbackground=col["fg"], selectbackground=col["accent"],
+                      selectforeground="#ffffff", highlightthickness=1, highlightbackground=col["rule"],
+                      highlightcolor=col["accent"])
+        box.insert("1.0", text)
+        box.pack(fill=tk.X)
+        bar = tk.Frame(frame, background=self.bg)
+        bar.pack(fill=tk.X, pady=(s(6), s(10)))
+
+        def submit(_e=None):
+            new = box.get("1.0", "end-1c").strip()
+            if not new or new == self.blocks.get(n, {}).get("text"):
+                self._end_edit(n)
+            elif not self.blocks[n]["on_edit"](new):  # nicht möglich (z. B. Antwort läuft) → Feld bleibt offen
+                box.focus_set()
+            return "break"
+
+        def on_enter(e):
+            return None if e.state & 0x0001 else submit()  # Umschalt+Enter: neue Zeile
+
+        ttk.Button(bar, text="Senden", style="Accent.TButton", command=submit).pack(side=tk.RIGHT)
+        ttk.Button(bar, text="Abbrechen", command=lambda: self._end_edit(n)).pack(side=tk.RIGHT, padx=(0, s(6)))
+        tk.Label(bar, text="Die bisherige Fassung bleibt erhalten (‹ ›).", background=self.bg,
+                 foreground=col["muted"], font=self.f_tiny).pack(side=tk.LEFT)
+        box.bind("<Return>", on_enter)
+        box.bind("<Escape>", lambda e: self._end_edit(n))
+        return frame, box
+
+    def _draw_quote(self, c: tk.Canvas, quote: str):
+        """Zitat über der eigenen Nachricht: Kärtchen mit Akzentstreifen links und dem markierten Text."""
+        if not self.col:
+            return
+        c.delete("all")
+        s = self._s
+        pad, bar, r = s(9), s(3), s(10)
+        short = " ".join(quote.split())
+        short = short if len(short) <= 220 else short[:219].rstrip() + "…"
+        tid = c.create_text(pad + bar + s(9), pad, text=short, anchor="nw", font=self.f_small_i,
+                            width=self._bubble_max() - 2 * pad - bar - s(9), fill=self.col["muted"])
+        x1, y1, x2, y2 = c.bbox(tid)
+        w, h = x2 + pad, max(y2 - y1 + 2 * pad, 2 * r + 2)
+        c.configure(width=w, height=h, background=self.bg)
+        self._rounded(c, 0, 0, w, h, r, self.col["code_hdr"])
+        c.create_rectangle(pad, pad, pad + bar, h - pad, fill=self.col["accent"], outline="")
+        c.tag_raise(tid)
 
     # ---------------------------------------------------------------- Gruppenchat: andere Teilnehmer (links)
 
@@ -413,33 +604,8 @@ class ChatView:
     def _bubble_max(self) -> int:
         return min(round(self._area_width() * 0.78), self._s(620))
 
-    def _corner_images(self, r: int, fill: str, under: str | None = None) -> list:
-        """Kantengeglättete Viertelkreise (oben links, oben rechts, unten links, unten rechts) in Farbe fill
-        auf dem Untergrund under (Standard: Chat-Hintergrund)."""
-        under = under or self.bg
-        key = (r, fill, under)
-        if key not in self._corners:
-            imgs = []
-            for cx, cy in ((r, r), (0, r), (r, 0), (0, 0)):   # Kreismittelpunkt je Ecke
-                img = tk.PhotoImage(master=self.t, width=r, height=r)
-                rows = []
-                for y in range(r):
-                    row = [mix_hex(under, fill, r - math.hypot(x + 0.5 - cx, y + 0.5 - cy) + 0.5) for x in range(r)]
-                    rows.append("{" + " ".join(row) + "}")
-                img.put(" ".join(rows))
-                imgs.append(img)
-            self._corners[key] = imgs
-        return self._corners[key]
-
     def _rounded(self, c: tk.Canvas, x: int, y: int, w: int, h: int, r: int, fill: str, tags=(), under=None):
-        """Rechteck mit kantengeglätteten runden Ecken (Ecken als vorberechnete Bilder)."""
-        c.create_rectangle(x + r, y, x + w - r, y + h, fill=fill, outline="", tags=tags)
-        c.create_rectangle(x, y + r, x + w, y + h - r, fill=fill, outline="", tags=tags)
-        nw, ne, sw, se = self._corner_images(r, fill, under)
-        c.create_image(x, y, image=nw, anchor="nw", tags=tags)
-        c.create_image(x + w - r, y, image=ne, anchor="nw", tags=tags)
-        c.create_image(x, y + h - r, image=sw, anchor="nw", tags=tags)
-        c.create_image(x + w - r, y + h - r, image=se, anchor="nw", tags=tags)
+        rounded(c, self._corners, x, y, w, h, r, fill, under or self.bg, tags)
 
     def _draw_bubble(self, c: tk.Canvas, text: str, other: bool = False):
         """Sprechblase; other=True: neutrale Farbe für Nachrichten anderer Menschen im Gruppenchat."""
@@ -541,10 +707,13 @@ class ChatView:
             if c.winfo_exists():
                 if kind == "files":
                     self._draw_files(c, data)
+                elif kind == "quote":
+                    self._draw_quote(c, data)
                 else:
                     self._draw_bubble(c, data, other=kind == "obubble")
 
     def _on_configure(self, _e=None):
+        self._hide_quote_pop()
         if self._layout_job:
             self.t.after_cancel(self._layout_job)
         self._layout_job = self.t.after(40, self._relayout)
@@ -909,26 +1078,25 @@ class ChatView:
         mark = ("  ✓", ("st_ok",)) if b["ok"] else ("  ✗", ("st_err",))
         return [(text, ()), mark, (f"   {chev}", ())]
 
-    def _insert_header(self, n: int):
+    def _write_header(self, n: int, at: str):
         b = self.blocks[n]
         base = "think_hdr" if b["kind"] == "think" else "tool_hdr"
         for text, extra in self._header_parts(n):
-            tags = (base, "clickable", f"hdr:{n}") + (("live",) if b["live"] else ()) + extra
-            self.t.insert(self._at, text, tags)
-        self.t.insert(self._at, "\n", base)
+            self.t.insert(at, text, (base, "clickable", f"hdr:{n}") + (("live",) if b["live"] else ()) + extra)
+        return base
+
+    def _insert_header(self, n: int):
+        self.t.insert(self._at, "\n", self._write_header(n, self._at))
 
     def _update_header(self, n: int):
-        b, r = self.blocks.get(n), self.t.tag_ranges(f"hdr:{n}")
-        if not b or not r:
+        r = self.t.tag_ranges(f"hdr:{n}")
+        if n not in self.blocks or not r:
             return
-        base = "think_hdr" if b["kind"] == "think" else "tool_hdr"
         with self._edit(follow=False):
             self.t.mark_set("hdr_ins", r[0])
             self.t.mark_gravity("hdr_ins", "right")
             self.t.delete(r[0], r[-1])
-            for text, extra in self._header_parts(n):
-                tags = (base, "clickable", f"hdr:{n}") + (("live",) if b["live"] else ()) + extra
-                self.t.insert("hdr_ins", text, tags)
+            self._write_header(n, "hdr_ins")
 
     def toggle(self, n: int):
         b = self.blocks.get(n)
@@ -1092,6 +1260,7 @@ class ChatView:
     # ================================================================ Maus & Zwischenablage
 
     def _on_wheel(self, e):
+        self._hide_quote_pop()  # steht an fester Stelle – beim Scrollen würde es verrutschen
         if e.delta:
             self._scroll_left -= e.delta / 120 * 3 * self.f_base.metrics("linespace")
             if self._scroll_job is None:
@@ -1150,6 +1319,13 @@ class ChatView:
                 self._flash(tag, "✓ Kopiert", ("pre_hdr", "clickable"))
             elif kind == "lnk":
                 webbrowser.open(b["url"])
+            elif kind == "ucp":
+                self._copy(b["text"])
+                self._flash(tag, "✓ Kopiert", ("uact", "clickable", f"uact:{n}"))
+            elif kind == "ued":
+                self._begin_edit(n)
+            elif kind in ("uvp", "uvn") and b.get("on_version"):
+                self.t.after_idle(lambda f=b["on_version"], k=b["cur"] + (1 if kind == "uvn" else -1): f(k))
             else:
                 continue
             return "break"
@@ -1179,6 +1355,59 @@ class ChatView:
     def _copy(self, text: str):
         self.t.clipboard_clear()
         self.t.clipboard_append(text)
+
+    # ---------------------------------------------------------------- Markierten Text beantworten / kopieren
+
+    def _on_release(self, e):
+        if self.on_quote:
+            self.t.after_idle(lambda: self._show_quote_pop(e.x, e.y))
+
+    def _show_quote_pop(self, x: int, y: int):
+        """Kleines Feld „↳ Antworten  ⧉ Kopieren“ über der Stelle, an der die Markierung endet."""
+        self._hide_quote_pop()
+        if not self.t.tag_ranges("sel") or not self.col:
+            return
+        text = self.t.get("sel.first", "sel.last").strip()
+        if len(text) < 2:
+            return
+        col, s = self.col, self._s
+        pop = tk.Frame(self.t, background=col["rule"], padx=1, pady=1)   # 1 px Rahmen
+        inner = tk.Frame(pop, background=col["code_hdr"])
+        inner.pack()
+        hover = mix_hex(col["code_hdr"], col["fg"], 0.12)
+
+        def answer():
+            self._hide_quote_pop()
+            self.t.tag_remove("sel", "1.0", "end")
+            self.on_quote(text)
+
+        def copy():
+            self._copy(text)
+            self._hide_quote_pop()
+
+        for label, command in (("↳ Antworten", answer), ("⧉ Kopieren", copy)):
+            btn = tk.Label(inner, text=label, font=self.f_small, background=col["code_hdr"], foreground=col["fg"],
+                           padx=s(10), pady=s(5), cursor="hand2")
+            btn.pack(side=tk.LEFT)
+            btn.bind("<Button-1>", lambda e, f=command: f())
+            btn.bind("<Enter>", lambda e, w=btn: w.configure(background=hover))
+            btn.bind("<Leave>", lambda e, w=btn: w.configure(background=col["code_hdr"]))
+        pop.update_idletasks()
+        w, h = pop.winfo_reqwidth(), pop.winfo_reqheight()
+        line = self.t.dlineinfo(f"@{x},{y}")  # Bildschirmzeile unter der Maus: Feld darüber, sonst darunter
+        top, height = (line[1], line[3]) if line else (y, 0)
+        px = min(max(0, x - w // 2), max(0, self.t.winfo_width() - w))
+        py = top - h - s(4) if top - h - s(4) >= 0 else top + height + s(4)
+        pop.place(x=px, y=py)
+        self._quote_pop = pop
+
+    def _hide_quote_pop(self):
+        if self._quote_pop:
+            try:
+                self._quote_pop.destroy()
+            except tk.TclError:
+                pass
+            self._quote_pop = None
 
     def _copy_selection(self):
         if self.t.tag_ranges("sel"):

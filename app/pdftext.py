@@ -1,8 +1,4 @@
-"""Text aus PDF-Dateien lesen – ohne Zusatzpakete.
-
-Deckt die üblichen, am Computer erzeugten PDFs ab (Word, LibreOffice, LaTeX, Browser „Als PDF speichern“,
-Rechnungen aus Online-Shops …). Eingescannte PDFs bestehen nur aus Bildern und enthalten keinen Text;
-verschlüsselte PDFs können nicht gelesen werden.
+"""Text aus am Computer erzeugten PDFs lesen (ohne Zusatzpakete) – nicht aus eingescannten oder verschlüsselten.
 
 extract(daten) -> (Text mit „--- Seite n ---“-Markierungen, Seitenzahl)
 """

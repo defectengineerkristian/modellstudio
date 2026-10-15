@@ -1,6 +1,7 @@
 """Speichert Chats als JSON-Dateien im Ordner chats/ neben ModellStudio.pyw."""
 
 import json
+import re
 import secrets
 import shutil
 from datetime import datetime, timedelta
@@ -71,16 +72,37 @@ def exists(chat_id: str) -> bool:
     return _file(chat_id).is_file()
 
 
+_index: dict[str, tuple] = {}  # Datei → ((mtime, größe), Eintrag): nur geänderte Chats neu lesen
+_HEAD = re.compile(r'"(id|title|updated)": ("(?:[^"\\]|\\.)*")')
+
+
+def _meta(f: Path) -> dict:
+    """id/title/updated stehen am Dateianfang (vor den Nachrichten) – meist reichen die ersten 2 KB."""
+    with open(f, "rb") as fh:
+        head = fh.read(2048).decode("utf-8", "ignore").split('"messages"')[0]
+    found = {k: json.loads(v) for k, v in _HEAD.findall(head)}
+    if "id" not in found or "updated" not in found:
+        c = json.loads(f.read_text(encoding="utf-8"))
+        found = {k: c.get(k, "") for k in ("id", "title", "updated")}
+    return {"id": found["id"], "title": found.get("title") or "Chat", "updated": found.get("updated", "")}
+
+
 def list_all() -> list[dict]:
-    """Alle Chats (ohne Nachrichten), neueste zuerst."""
-    out = []
-    if CHAT_DIR.is_dir():
-        for f in CHAT_DIR.glob("*.json"):
-            try:
-                c = json.loads(f.read_text(encoding="utf-8"))
-                out.append({"id": c["id"], "title": c.get("title") or "Chat", "updated": c.get("updated", "")})
-            except (OSError, ValueError, KeyError):
-                continue
+    """Alle Chats (id, title, updated), neueste zuerst."""
+    out, seen = [], set()
+    for f in CHAT_DIR.glob("*.json") if CHAT_DIR.is_dir() else []:
+        try:
+            st = f.stat()
+            stamp = (st.st_mtime_ns, st.st_size)
+            cached = _index.get(f.name)
+            if not cached or cached[0] != stamp:
+                cached = _index[f.name] = (stamp, _meta(f))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        seen.add(f.name)
+        out.append(cached[1])
+    for gone in set(_index) - seen:
+        del _index[gone]
     return sorted(out, key=lambda c: c["updated"], reverse=True)
 
 

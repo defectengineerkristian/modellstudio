@@ -1,14 +1,23 @@
-"""Eigene Bedienelemente, die Tk/ttk so nicht mitbringen.
-
-ModeSwitch – Umschalter mit gleitender, abgerundeter Markierung (z. B. „Chat | WebFusedAgentMod“).
-"""
+"""Eigene Bedienelemente: Felder mit einfärbbarem Scrollbalken, abgerundete Rechtecke, ModeSwitch."""
 
 import math
 import time
 import tkinter as tk
 from tkinter import font as tkfont
+from tkinter import ttk
 
 from themes import mix_hex
+
+
+def scrolled(parent, widget=tk.Text, **kw):
+    """Text- oder Listenfeld mit ttk-Scrollbalken (der native lässt sich nicht einfärben) → (Rahmen, Feld)."""
+    frame = ttk.Frame(parent)
+    w = widget(frame, **kw)
+    sb = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=w.yview)
+    w.configure(yscrollcommand=sb.set)
+    sb.pack(side=tk.RIGHT, fill=tk.Y)
+    w.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    return frame, w
 
 
 def _corners(master, cache: dict, r: int, fill: str, under: str) -> list:
